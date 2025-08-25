@@ -19,16 +19,16 @@ try: # If you like to use these helpers, you can.
 except:
     pass
 
-from cecl.models.qwen3 import create_model_from_ckpt
-from cecl.utils.configs import define_flag_dict
-from cecl.utils.wandb import setup_wandb
-from cecl.envs.env_creator import create_env
-from cecl.utils.sharding import create_sharding, host_gather
-from cecl.utils.train_state import TrainState
-from cecl.models.tokenizer import create_tokenizer
-from cecl.utils.checkpoint import Checkpoint
-from cecl.core.sampling import pad_and_collate, autoregressive_sample
-from cecl.core.eval import eval_model
+from lmpo.models.qwen3 import create_model_from_ckpt
+from lmpo.utils.configs import define_flag_dict
+from lmpo.utils.wandb import setup_wandb
+from lmpo.envs.env_creator import create_env
+from lmpo.utils.sharding import create_sharding, host_gather
+from lmpo.utils.train_state import TrainState
+from lmpo.models.tokenizer import create_tokenizer
+from lmpo.utils.checkpoint import Checkpoint
+from lmpo.core.sampling import pad_and_collate, autoregressive_sample
+from lmpo.core.eval import eval_model
 
 config = ml_collections.ConfigDict({
     'wandb_project': "lmpo",
@@ -291,6 +291,7 @@ for i in tqdm.tqdm(range(10000)):
             info['env_epochs'] = total_rollouts / env_num_tasks
         info['rollout_iters_per_update'] = num_rollout_iters
         info['global_step'] = i
+        info['time_per_inference_iteration'] = rollout_total_time / num_rollout_iters
         info['time_per_rollout'] = rollout_total_time / (num_rollout_iters * rollout_batch_size * jax.host_count())
         info['time_per_effective_rollout'] = rollout_total_time / global_batch_size
         info['effective_rollout_ratio'] = global_batch_size / (rollout_batch_size * jax.host_count() * num_rollout_iters)

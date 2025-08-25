@@ -4,8 +4,8 @@ import numpy as np
 import jax
 from functools import partial
 
-from cecl.utils.sharding import host_gather
-from cecl.models.qwen3 import Qwen3Model, KVCache, count_left_padding
+from lmpo.utils.sharding import host_gather
+from lmpo.models.qwen3 import Qwen3Model, KVCache, count_left_padding
 
 def pad_and_collate(token_batch: list, pad_id: int = 0, force_length: int = None):
     max_len = max([len(x) for x in token_batch])
@@ -38,26 +38,28 @@ def autoregressive_sample(model: Qwen3Model, params, prompt_tokens, num_generati
     cache = cache.replace(starts=count_left_padding(prompt_tokens, pad_id=pad_id))
 
     if model_apply is None:
-        @partial(jax.jit, out_shardings=(data_shard, cache_sharding))
-        def model_apply(params, tokens, token_mask, cache):
+        @partial(jax.jit, out_shardings=(no_shard, cache_sharding), donate_argnums=3, static_argnames=['sample_token'])
+        def model_apply(params, tokens, token_mask, cache, key=None, sample_token=False):
+            params = jax.tree.map(lambda p: p.astype(jnp.bfloat16), params)
             print("JIT compiling sampling for tokens of shape", tokens.shape, "max_seq_len", max_seq_len)
-            return model.apply({'params': params}, tokens, token_mask, cache=cache)
+            logits, cache = model.apply({'params': params}, tokens, token_mask, cache=cache, get_logits=sample_token)
+            if sample_token:
+                logits = logits[:, 0, :]
+                sampled_token = jax.random.categorical(key, logits/temp, axis=-1)
+            else:
+                sampled_token = None
+            return sampled_token, cache
 
     # Fill cache with the prompt tokens.
-    _, cache = model_apply(params, prompt_tokens[:, :-1], token_mask[:, :-1], cache=cache)
+    _, cache = model_apply(params, prompt_tokens[:, :-1], token_mask[:, :-1], cache=cache, sample_token=False)
     sampled_token = prompt_tokens[:, -1]  # Start with the last token of the prompt.
     tokens_list = []
 
     max_samples = max_seq_len - prompt_tokens.shape[-1]
     for i in range(max_samples):
         next_token_mask = jnp.ones(sampled_token.shape, dtype=jnp.int32)
-        logits, cache = model_apply(params, sampled_token[:, None], next_token_mask[:, None], cache=cache)
-        logits = logits[:, 0, :]
         key, rng = jax.random.split(rng)
-        if temp == 0:
-            sampled_token = jnp.argmax(logits, axis=-1)
-        else:
-            sampled_token = jax.random.categorical(key, logits / temp, axis=-1) # [batch]
+        sampled_token, cache = model_apply(params, sampled_token[:, None], next_token_mask[:, None], cache=cache, key=key, sample_token=True)
 
         # Yes, this is very ugly, even a sin. 
         # It's a helper flag to force insertion of an <answer> tag (force_answer_at) tokens before the end.
@@ -86,9 +88,9 @@ def autoregressive_sample(model: Qwen3Model, params, prompt_tokens, num_generati
 ##################################################
 if __name__ == "__main__":
     import argparse
-    from cecl.models.qwen3 import create_model_from_ckpt
-    from cecl.utils.sharding import create_sharding, host_gather
-    from cecl.models.tokenizer import create_tokenizer
+    from lmpo.models.qwen3 import create_model_from_ckpt
+    from lmpo.utils.sharding import create_sharding, host_gather
+    from lmpo.models.tokenizer import create_tokenizer
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--ckpt-dir', type=str, default='/nfs/gcs/jaxconverted/Qwen3-0.6B/')
