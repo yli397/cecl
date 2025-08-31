@@ -237,10 +237,10 @@ Training logs are saved to:
 
 If you use this framework in your research, please cite:
 ```bibtex
-@software{cecl2024,
+@software{cecl2025,
   title={CECL: NCO Prediction with GRPO-Enhanced LLM},
   author={Your Team},
-  year={2024}
+  year={2025}
 }
 ```
 
