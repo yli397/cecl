@@ -1,4 +1,4 @@
-# LMPO NCO Training Justfile
+# cecl NCO Training Justfile
 # Usage: just <command>
 
 # Default variables
@@ -33,7 +33,7 @@ train-nco name="NCO_H100" batch="24":
 train-nco-enhanced name="NCO_Enhanced" batch="16":
     {{base_env}} python cecl/core/grpo.py \
         --wandb_name {{name}} \
-        --env_name nco_enhanced \
+        --env_name nco \
         --model_dir {{model_dir}} \
         --groups_per_batch {{batch}} \
         --ppo_minibatch {{batch}} \

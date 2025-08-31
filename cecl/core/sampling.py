@@ -4,8 +4,9 @@ import numpy as np
 import jax
 from functools import partial
 
-from lmpo.utils.sharding import host_gather
-from lmpo.models.qwen3 import Qwen3Model, KVCache, count_left_padding
+from cecl.utils.sharding import host_gather
+from cecl.models.qwen3 import Qwen3Model, KVCache, count_left_padding
+
 
 def pad_and_collate(token_batch: list, pad_id: int = 0, force_length: int = None):
     max_len = max([len(x) for x in token_batch])
@@ -17,8 +18,24 @@ def pad_and_collate(token_batch: list, pad_id: int = 0, force_length: int = None
         max_len = force_length
     return np.array([(max_len - len(x)) * [pad_id] + x for x in token_batch])
 
-model_apply = None # Global variable to cache the JIT-compiled model application function.
-def autoregressive_sample(model: Qwen3Model, params, prompt_tokens, num_generation_tokens, rng, temp=1, pad_id=0, data_shard=None, no_shard=None, force_answer_at=-1):
+
+model_apply = (
+    None  # Global variable to cache the JIT-compiled model application function.
+)
+
+
+def autoregressive_sample(
+    model: Qwen3Model,
+    params,
+    prompt_tokens,
+    num_generation_tokens,
+    rng,
+    temp=1,
+    pad_id=0,
+    data_shard=None,
+    no_shard=None,
+    force_answer_at=-1,
+):
     """
     Samples tokens autoregressively, and can batch for performance.
     Args:
@@ -31,27 +48,56 @@ def autoregressive_sample(model: Qwen3Model, params, prompt_tokens, num_generati
     max_seq_len = prompt_tokens.shape[1] + num_generation_tokens
 
     cache_sharding = KVCache.get_sharding(data_shard, no_shard)
+
     @partial(jax.jit, out_shardings=cache_sharding)
     def get_cache():
-        return KVCache.create(model.num_layers, batch_size, max_seq_len, model.head_dim, model.kv_heads)
+        return KVCache.create(
+            model.num_layers, batch_size, max_seq_len, model.head_dim, model.kv_heads
+        )
+
     cache = get_cache()  # [batch, num_layers, max_seq_len, head_dim]
     cache = cache.replace(starts=count_left_padding(prompt_tokens, pad_id=pad_id))
 
     if model_apply is None:
-        @partial(jax.jit, out_shardings=(no_shard, cache_sharding), donate_argnums=3, static_argnames=['sample_token'])
-        def model_apply(params, tokens, token_mask, cache, key=None, sample_token=False):
+
+        @partial(
+            jax.jit,
+            out_shardings=(no_shard, cache_sharding),
+            donate_argnums=3,
+            static_argnames=["sample_token"],
+        )
+        def model_apply(
+            params, tokens, token_mask, cache, key=None, sample_token=False
+        ):
             params = jax.tree.map(lambda p: p.astype(jnp.bfloat16), params)
-            print("JIT compiling sampling for tokens of shape", tokens.shape, "max_seq_len", max_seq_len)
-            logits, cache = model.apply({'params': params}, tokens, token_mask, cache=cache, get_logits=sample_token)
+            print(
+                "JIT compiling sampling for tokens of shape",
+                tokens.shape,
+                "max_seq_len",
+                max_seq_len,
+            )
+            logits, cache = model.apply(
+                {"params": params},
+                tokens,
+                token_mask,
+                cache=cache,
+                get_logits=sample_token,
+            )
             if sample_token:
                 logits = logits[:, 0, :]
-                sampled_token = jax.random.categorical(key, logits/temp, axis=-1)
+                sampled_token = jax.random.categorical(key, logits / temp, axis=-1)
             else:
                 sampled_token = None
             return sampled_token, cache
 
     # Fill cache with the prompt tokens.
-    _, cache = model_apply(params, prompt_tokens[:, :-1], token_mask[:, :-1], cache=cache, sample_token=False)
+    _, cache = model_apply(
+        params,
+        prompt_tokens[:, :-1],
+        token_mask[:, :-1],
+        cache=cache,
+        sample_token=False,
+    )
     sampled_token = prompt_tokens[:, -1]  # Start with the last token of the prompt.
     tokens_list = []
 
@@ -59,28 +105,33 @@ def autoregressive_sample(model: Qwen3Model, params, prompt_tokens, num_generati
     for i in range(max_samples):
         next_token_mask = jnp.ones(sampled_token.shape, dtype=jnp.int32)
         key, rng = jax.random.split(rng)
-        sampled_token, cache = model_apply(params, sampled_token[:, None], next_token_mask[:, None], cache=cache, key=key, sample_token=True)
+        sampled_token, cache = model_apply(
+            params,
+            sampled_token[:, None],
+            next_token_mask[:, None],
+            cache=cache,
+            key=key,
+            sample_token=True,
+        )
 
-        # Yes, this is very ugly, even a sin. 
+        # Yes, this is very ugly, even a sin.
         # It's a helper flag to force insertion of an <answer> tag (force_answer_at) tokens before the end.
         if force_answer_at > 0:
             if i == max_samples - force_answer_at:
-                sampled_token = jnp.ones_like(sampled_token) * 198 # \n
-            elif i == max_samples - force_answer_at+1:
-                sampled_token = jnp.ones_like(sampled_token) * 198 # \n
-            elif i == max_samples - force_answer_at+2:
-                sampled_token = jnp.ones_like(sampled_token) * 27 # <
-            elif i == max_samples - force_answer_at+3:
-                sampled_token = jnp.ones_like(sampled_token) * 9217 # answer
-            elif i == max_samples - force_answer_at+4:
-                sampled_token = jnp.ones_like(sampled_token) * 29 # />
+                sampled_token = jnp.ones_like(sampled_token) * 198  # \n
+            elif i == max_samples - force_answer_at + 1:
+                sampled_token = jnp.ones_like(sampled_token) * 198  # \n
+            elif i == max_samples - force_answer_at + 2:
+                sampled_token = jnp.ones_like(sampled_token) * 27  # <
+            elif i == max_samples - force_answer_at + 3:
+                sampled_token = jnp.ones_like(sampled_token) * 9217  # answer
+            elif i == max_samples - force_answer_at + 4:
+                sampled_token = jnp.ones_like(sampled_token) * 29  # />
 
         tokens_list.append(sampled_token)
 
-    tokens = jnp.stack(tokens_list, axis=-1) # [batch, time]
+    tokens = jnp.stack(tokens_list, axis=-1)  # [batch, time]
     return tokens
-
-
 
 
 ######$###########################################
@@ -88,26 +139,48 @@ def autoregressive_sample(model: Qwen3Model, params, prompt_tokens, num_generati
 ##################################################
 if __name__ == "__main__":
     import argparse
-    from lmpo.models.qwen3 import create_model_from_ckpt
-    from lmpo.utils.sharding import create_sharding, host_gather
-    from lmpo.models.tokenizer import create_tokenizer
+    from cecl.models.qwen3 import create_model_from_ckpt
+    from cecl.utils.sharding import create_sharding, host_gather
+    from cecl.models.tokenizer import create_tokenizer
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--ckpt-dir', type=str, default='/nfs/gcs/jaxconverted/Qwen3-0.6B/')
+    parser.add_argument(
+        "--ckpt-dir", type=str, default="/nfs/gcs/jaxconverted/Qwen3-0.6B/"
+    )
     args = parser.parse_args()
     ckpt_dir = args.ckpt_dir
 
     model, params = create_model_from_ckpt(ckpt_dir)
-    param_shard, no_shard, data_shard, shard_data_fn = create_sharding('fsdp', train_state_shape=params)
+    param_shard, no_shard, data_shard, shard_data_fn = create_sharding(
+        "fsdp", train_state_shape=params
+    )
     params = jax.jit(lambda x: x, out_shardings=param_shard)(params)
     tokenizer = create_tokenizer(ckpt_dir)
 
-    labels = ['cat', 'dog', 'bird', 'fish', 'elephant', 'tiger', 'lion', 'giraffe', 'zebra', 'monkey']
-    poem_prompts = [f'Write a haiku about of {labels[np.random.randint(len(labels))]}' for _ in range(len(jax.local_devices()))]
+    labels = [
+        "cat",
+        "dog",
+        "bird",
+        "fish",
+        "elephant",
+        "tiger",
+        "lion",
+        "giraffe",
+        "zebra",
+        "monkey",
+    ]
+    poem_prompts = [
+        f"Write a haiku about of {labels[np.random.randint(len(labels))]}"
+        for _ in range(len(jax.local_devices()))
+    ]
 
     pad_id = 0
     token_list = [
-        tokenizer.apply_chat_template([{"role": "user", "content": text}], add_generation_prompt=True, enable_thinking=False)
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": text}],
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
         for text in poem_prompts
     ]
 
@@ -118,16 +191,24 @@ if __name__ == "__main__":
     num_generation_tokens = 32
     rng = jax.random.PRNGKey(0)
     tokens_out = autoregressive_sample(
-        model, params, token_batch, rng=rng, num_generation_tokens=num_generation_tokens, pad_id=pad_id, data_shard=data_shard, no_shard=no_shard)
+        model,
+        params,
+        token_batch,
+        rng=rng,
+        num_generation_tokens=num_generation_tokens,
+        pad_id=pad_id,
+        data_shard=data_shard,
+        no_shard=no_shard,
+    )
     tokens_out = host_gather(tokens_out)
 
     responses = [tokenizer.decode(row) for row in tokens_out]
     if jax.process_index() == 0:
         for i, text in enumerate(poem_prompts):
             print(f" ======= {text} =======")
-            print(responses[i].split('<|im_end|>')[0])
+            print(responses[i].split("<|im_end|>")[0])
 
         print("========= Full raw decoded tokens =========")
         print(tokenizer.decode(token_list[0] + tokens_out[0].tolist()))
-        print('Total tokens shape', tokens_out.shape)
+        print("Total tokens shape", tokens_out.shape)
         print("=============")
